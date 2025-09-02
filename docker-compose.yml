@@ -1,0 +1,28 @@
+# docker-compose.yml
+
+services:
+  # Service #1: Your main application that makes the request
+  api:
+    image: adrianmirza/elucidation:latest
+    container_name: spec2struct_api_service
+    ports:
+      - "8000:8000"
+    depends_on:
+      # - vectordb
+      - forward_synthesis
+    networks:
+      - my-app-network
+
+  # Service #2: Your vector database that receives the request
+  vectordb:
+    image: adrianmirza/retrieval # Use pre-built Docker image
+    container_name: vectordb_service # Renamed for clarity
+    ports:
+      - "7999:7999" # Port for the vector database
+    expose:
+      - "7999" # Expose the port internally
+    volumes:
+      - /pubchem_vector_db_hnsw_pq.index:/pubchem_vector_db_hnsw_pq.index
+    restart: unless-stopped
+    networks:
+      - my-app-network
