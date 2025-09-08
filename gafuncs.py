@@ -1,6 +1,5 @@
 import json
 from collections.abc import Callable
-from random import Random
 from typing import TypeVar
 
 import numpy as np
@@ -59,15 +58,14 @@ class CachedFunction:
                 "retrieved": k in self.initial_population,
             }
             for k, v in self.cache.items()
-        ]  # TODO: try to limit the size of the cache
-
+        ]
         # Sort the list of items by score in descending order (higher score is better)
         sorted_items = sorted(all_items, key=lambda item: item["score"], reverse=True)
 
         # Take the top 512 items from the sorted list
         top_128_items = sorted_items[:128]
 
-        with open(f"{CACHE_DIR!s}/{self.spectra_hash}_cache.json", "w") as f:
+        with open(f"{CACHE_DIR!s}/{self.spectra_hash}.json", "w") as f:
             json.dump(top_128_items, f)
 
         return [self.cache[x] for x in inputs]

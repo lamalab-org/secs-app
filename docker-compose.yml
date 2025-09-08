@@ -8,9 +8,10 @@ services:
 
   # Service #2: Your FastAPI Application
   api:
-    build:
-      context: .
-      dockerfile: api.Dockerfile
+    # build:
+    #   context: .
+    #   dockerfile: api.Dockerfile
+    image: adrianmirza/elucidation:latest
     container_name: spec2struct_api_service
     command: uvicorn app:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300
     ports:
@@ -32,9 +33,10 @@ services:
 
   # Service #3: The Celery Worker
   worker:
-    build:
-      context: .
-      dockerfile: api.Dockerfile
+    # build:
+    #   context: .
+    #   dockerfile: api.Dockerfile
+    image: adrianmirza/elucidation:latest
     container_name: celery_worker
     command: celery -A celery_config.celery_app worker -l info -Q spectrum_queue --concurrency=5
     depends_on:

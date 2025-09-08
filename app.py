@@ -126,15 +126,15 @@ def get_job_result(job_id: str):
             detail=f"Job not completed. Current status: {task_result.state}",
         )
 
-    result_file = CACHE_DIR / f"{job_id}_cache.json"
-    # try:
-    with result_file.open("r") as f:
-        data = json.load(f)
-    return data
-    # except FileNotFoundError:
-    #     raise HTTPException(status_code=404, detail="Result file not found")  # noqa: B904
-    # except Exception as e:
-    #     raise HTTPException(status_code=500, detail=f"Error loading results: {e!s}")  # noqa: B904
+    result_file = CACHE_DIR / f"{job_id}.json"
+    try:
+        with result_file.open("r") as f:
+            data = json.load(f)
+        return data
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Result file not found")  # noqa: B904
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading results: {e!s}")  # noqa: B904
 
 
 @app.delete("/jobs/{job_id}")
