@@ -27,10 +27,13 @@ RUN uv pip install --system --torch-backend cpu -U torch \
     "git+https://github.com/lamalab-org/MoleculeBind.git" \
     "pydantic" \
     "fastapi" \
+    "celery" \
+    "redis" \
     "uvicorn[standard]"
 
 # RUN uv pip install --system --torch-backend cpu -U torch
 COPY ./checkpoints/ ./checkpoints/
+COPY ./celery_config.py ./celery_config.py
 COPY ./retrieval.py ./retrieval.py
 COPY ./main.py ./main.py
 COPY ./gafuncs.py ./gafuncs.py

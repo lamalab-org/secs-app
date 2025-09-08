@@ -1,14 +1,13 @@
+import json
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
 from random import Random
 from typing import TypeVar
 
-import joblib
 import numpy as np
-from loguru import logger
-from mol_ga.graph_ga.gen_candidates import reproduce
-from mol_ga.graph_ga.mutate import mutate
-from rdkit import Chem, RDLogger
+from config import CACHE_DIR
+from rdkit import Chem
+
+from molbind.utils.spec2struct import smiles_to_molecular_formula
 
 # Generic types for inputs and outputs
 InputType = TypeVar("InputType")
@@ -21,48 +20,74 @@ class CachedFunction:
     def __init__(
         self,
         f: Callable,
-        original_smiles: str | None = None,
+        spectra_hash: str,
+        initial_population: list[str],
     ):
         """Init function
 
         :type f: callable
-        :type original_smiles: str
+        :param f: The function to be evaluated.
+        :type spectra_hash: str
+        :param spectra_hash: A hash identifying the spectra.
+        :type initial_population: list[str]
+        :param initial_population: A list of initial SMILES strings.
         """
         self._f = f
+        self._batch_f_eval = f  # Assuming the function f handles batch evaluation
+        self.spectra_hash = spectra_hash
         self.cache = {}
-        self.best_smiles: tuple[float, str] = None
-        self.original_smiles = original_smiles
+        self.initial_population = initial_population
 
-    def eval_batch(self, inputs):
+    def eval_batch(self, inputs: list[str]) -> list[float]:
+        """Evaluates the function on a batch of inputs, using the cache."""
         # Eval function at non-cached inputs
         inputs_not_cached = [x for x in inputs if x not in self.cache]
-        outputs_not_cached = self._batch_f_eval(inputs_not_cached)
+        if inputs_not_cached:
+            outputs_not_cached = self._batch_f_eval(inputs_not_cached)
+            # Add new values to cache
+            for x, y in zip(inputs_not_cached, outputs_not_cached, strict=False):
+                self.cache[x] = y
 
-        # Add new values to cache
-        for x, y in zip(inputs_not_cached, outputs_not_cached, strict=False):
-            self.cache[x] = y
+        # --- Start of modification ---
+
+        # Create a list of all items in the cache
+        all_items = [
+            {
+                "smiles": k,
+                "score": v,
+                "molecular_formula": smiles_to_molecular_formula(k),
+                "retrieved": k in self.initial_population,
+            }
+            for k, v in self.cache.items()
+        ]  # TODO: try to limit the size of the cache
+
+        # Sort the list of items by score in descending order (higher score is better)
+        sorted_items = sorted(all_items, key=lambda item: item["score"], reverse=True)
+
+        # Take the top 512 items from the sorted list
+        top_128_items = sorted_items[:128]
+
+        with open(f"{CACHE_DIR!s}/{self.spectra_hash}_cache.json", "w") as f:
+            json.dump(top_128_items, f)
+
         return [self.cache[x] for x in inputs]
 
+    def eval_non_batch(self, inputs: str) -> float:
+        """Evaluates the function on a single input, using the cache."""
+        # This is a placeholder for how a non-batch evaluation might work
+        if inputs not in self.cache:
+            self.cache[inputs] = self._f([inputs])[0]
+        return self.cache[inputs]
+
     def __call__(self, inputs, batch=True):
+        """Allows the class instance to be called like a function."""
         # Ensure it is in batch form
         return self.eval_batch(inputs) if batch else self.eval_non_batch(inputs)
 
 
 class CachedBatchFunction(CachedFunction):
     def _batch_f_eval(self, input_list):
-        # this gen results
-        # current best
-        scores = self._f(input_list)
-        # log the best 3 smiles
-        score_list = list(zip(scores, input_list, strict=False))
-        # one best
-        best_score, best_smiles = max(score_list, key=lambda x: x[0])
-        if self.best_smiles is None or best_score > self.best_smiles[0]:
-            self.best_smiles = (best_score, best_smiles)
-            if self.best_smiles == self.original_smiles:
-                logger.info("THE CORRECT SMILES WAS FOUND!!!🎉")
-        logger.info(f"Best smiles: {self.best_smiles}")
-        return scores
+        return self._f(input_list)
 
 
 def get_number_of_topologically_distinct_atoms(smiles: str, atomic_number: int = 1):
@@ -96,7 +121,13 @@ def get_number_of_topologically_distinct_atoms(smiles: str, atomic_number: int =
         atom_ranks = np.array(atom_ranks)
 
         # Atom indices
-        atom_indices = np.array([atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() == atomic_number])
+        atom_indices = np.array(
+            [
+                atom.GetIdx()
+                for atom in mol.GetAtoms()
+                if atom.GetAtomicNum() == atomic_number
+            ]
+        )
         return len(set(atom_ranks[atom_indices]))
     except (TypeError, ValueError, AttributeError, IndexError):
         return len(smiles)
@@ -149,57 +180,3 @@ def smiles_is_radical_or_is_charged_or_has_wrong_valence(smiles: str) -> bool:
     except Exception:
         # Return True for any parsing errors (likely invalid structures)
         return True
-
-
-def graph_ga_blended_generation(
-    samples: list[str],
-    n_candidates: int,
-    rng: Random,
-    parallel: joblib.Parallel | None = None,
-    frac_graph_ga_mutate: float = 0.10,
-) -> set[str]:
-    """
-    Generate candidates with a blend between Graph GA crossover (with some mutation)
-    and Graph GA mutate only.
-    """
-
-    # Turn off logging
-    rd_logger = RDLogger.logger()
-    rd_logger.setLevel(RDLogger.CRITICAL)
-
-    # Step 1: divide samples into "mutate" and "reproduce" sets
-    samples_mutate: list[str] = []
-    samples_crossover: list[str] = []
-    for s in samples:
-        if rng.random() < frac_graph_ga_mutate:
-            samples_mutate.append(s)
-        else:
-            samples_crossover.append(s)
-    # Ensure there are not too many samples in the mutate set
-    samples_mutate = samples_mutate[: int(n_candidates * frac_graph_ga_mutate + 1)]  # add one to avoid rounding errors
-
-    # Step 2: run mutations
-    if parallel:
-        offspring = parallel(joblib.delayed(mutate)(s, rng) for s in samples_mutate)
-    else:
-        offspring = [mutate(s, rng) for s in samples_mutate]
-
-    # Step 3: run crossover betweeen the crossover samples and a shuffled version of itself
-    n_crossover = n_candidates - len(offspring)
-    crossover_pairs = list(samples_crossover)
-    rng.shuffle(crossover_pairs)
-    crossover_mut_rate = 1e-2
-    if parallel:
-        offspring += parallel(
-            joblib.delayed(reproduce)(s1, s2, crossover_mut_rate, rng)
-            for s1, s2 in zip(samples_crossover[:n_crossover], crossover_pairs, strict=False)
-        )
-    else:
-        offspring += [
-            reproduce(s1, s2, crossover_mut_rate, rng) for s1, s2 in zip(samples_crossover[:n_crossover], crossover_pairs, strict=False)
-        ]
-
-    # Step 4: post-process and return offspring
-    offspring = set(offspring)
-    offspring.discard(None)  # this sometimes is returned
-    return offspring
