@@ -23,20 +23,29 @@ def read_weights(config) -> MolBind:
     device = "cpu"
     model = MolBind(config).to(device)
     model.load_state_dict(
-        rename_keys_with_prefix(torch.load(config.ckpt_path, map_location=torch.device(device))["state_dict"]),
+        rename_keys_with_prefix(
+            torch.load(config.ckpt_path, map_location=torch.device(device))[
+                "state_dict"
+            ]
+        ),
         strict=True,
     )
     model.eval()
     return model
 
 
-def load_models_dict(configs_path: str, experiments_dict: dict[str, str | None]) -> dict[str, MolBind | None]:
+def load_models_dict(
+    configs_path: str, experiments_dict: dict[str, str | None]
+) -> dict[str, MolBind | None]:
     models = {}
     for modality, experiment in experiments_dict.items():
         if experiment:
             try:
                 with initialize(version_base="1.3", config_path=str(configs_path)):
-                    config = compose(config_name="molbind_config", overrides=[f"experiment={experiment}"])
+                    config = compose(
+                        config_name="molbind_config",
+                        overrides=[f"experiment={experiment}"],
+                    )
                 models[modality] = read_weights(config)
                 logger.info(f"Loaded {modality} model from experiment: {experiment}")
             except Exception as e:
@@ -47,7 +56,9 @@ def load_models_dict(configs_path: str, experiments_dict: dict[str, str | None])
     return models
 
 
-def tokenize_string(smiles: list[str] | str, modality_token_type: str = "smiles") -> tuple[Tensor, Tensor]:
+def tokenize_string(
+    smiles: list[str] | str, modality_token_type: str = "smiles"
+) -> tuple[Tensor, Tensor]:
     if isinstance(smiles, str):
         smiles = [smiles]
     # Ensure ModalityConstants uses the correct tokenizer for "smiles" type
@@ -58,13 +69,23 @@ def tokenize_string(smiles: list[str] | str, modality_token_type: str = "smiles"
         logger.error(
             f"Tokenizer for modality type '{modality_token_type}' not found in ModalityConstants. Defaulting to SMILES if possible."
         )
-        tokenizer = ModalityConstants["smiles"].tokenizer  # Fallback, might not be ideal
+        tokenizer = ModalityConstants[
+            "smiles"
+        ].tokenizer  # Fallback, might not be ideal
 
-    tokens = tokenizer(smiles, padding="max_length", truncation=True, return_tensors="pt", max_length=128)
+    tokens = tokenizer(
+        smiles,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+        max_length=128,
+    )
     return tokens["input_ids"], tokens["attention_mask"]
 
 
-def encode_smiles_variable(individuals: list[str] | str, models_dict: dict[str, MolBind | None]) -> dict[str, Tensor]:
+def encode_smiles_variable(
+    individuals: list[str] | str, models_dict: dict[str, MolBind | None]
+) -> dict[str, Tensor]:
     device = "cpu"
     input_ids, attention_mask = tokenize_string(individuals, "smiles")
     input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)
@@ -73,15 +94,23 @@ def encode_smiles_variable(individuals: list[str] | str, models_dict: dict[str, 
         for mod, model in models_dict.items():
             if model:
                 try:
-                    embeddings[mod] = model.encode_modality((input_ids, attention_mask), modality="smiles")
+                    embeddings[mod] = model.encode_modality(
+                        (input_ids, attention_mask), modality="smiles"
+                    )
                 except Exception as e_enc:
-                    logger.error(f"Error encoding SMILES with model for modality {mod}: {e_enc}")
-                    embeddings[mod] = torch.empty(0, device=device)  # Return empty on error
+                    logger.error(
+                        f"Error encoding SMILES with model for modality {mod}: {e_enc}"
+                    )
+                    embeddings[mod] = torch.empty(
+                        0, device=device
+                    )  # Return empty on error
     return embeddings
 
 
 def gpu_encode_smiles_variable(
-    individuals: list[str], models_dict: dict[str, MolBind | None], chunk_size: int = 8192
+    individuals: list[str],
+    models_dict: dict[str, MolBind | None],
+    chunk_size: int = 8192,
 ) -> dict[str, Tensor]:
     active_models = {m: model for m, model in models_dict.items() if model}
     # Determine a default device, even if no active models (for returning empty tensors)
@@ -91,7 +120,11 @@ def gpu_encode_smiles_variable(
         return {m: torch.empty(0, device=default_device) for m in models_dict}
 
     all_parts = {mod: [] for mod in active_models}
-    for i in tqdm(range(0, len(individuals), chunk_size), desc="Encoding SMILES (Batch)", leave=False):
+    for i in tqdm(
+        range(0, len(individuals), chunk_size),
+        desc="Encoding SMILES (Batch)",
+        leave=False,
+    ):
         batch = individuals[i : i + chunk_size]
         if not batch:
             continue
@@ -127,7 +160,9 @@ def tanimoto_similarity(smiles1: str, smiles2: str) -> float:
 # --- Embedding Pruning (Core Comparison Logic) ---
 def embedding_pruning_variable(
     smiles_to_score: list[str],
-    target_1D_spectral_embeddings: dict[str, Tensor],  # Key: mod, Val: 1D Tensor (D,) for target
+    target_1D_spectral_embeddings: dict[
+        str, Tensor
+    ],  # Key: mod, Val: 1D Tensor (D,) for target
     models_for_scoring: dict[str, MolBind | None],  # Models to encode candidate SMILES
     modality_ratios: dict[str, float] | None = None,
     chunk_size: int = 2048,
@@ -147,13 +182,19 @@ def embedding_pruning_variable(
     num_smiles = len(smiles_to_score)
     # Initialize return structures with correct device (CPU for scores)
     all_individual_scores_cpu = {
-        mod: torch.zeros(num_smiles, device="cpu") if num_smiles > 0 else torch.empty(0, device="cpu")
+        mod: torch.zeros(num_smiles, device="cpu")
+        if num_smiles > 0
+        else torch.empty(0, device="cpu")
         for mod in models_for_scoring  # Initialize for all models passed, not just scoreable
     }
-    combined_scores_cpu = torch.zeros(num_smiles, device="cpu") if num_smiles > 0 else None  # Will be None if num_smiles is 0
+    combined_scores_cpu = (
+        torch.zeros(num_smiles, device="cpu") if num_smiles > 0 else None
+    )  # Will be None if num_smiles is 0
 
     if not scoreable_modalities:
-        logger.warning("Pruning: No scoreable modalities (need 1D target & model). Returning zeros/empty.")
+        logger.warning(
+            "Pruning: No scoreable modalities (need 1D target & model). Returning zeros/empty."
+        )
         # Ensure all_individual_scores_cpu is returned for all original models_for_scoring keys
         # combined_scores_cpu is already correctly initialized
         return combined_scores_cpu, all_individual_scores_cpu
@@ -164,7 +205,9 @@ def embedding_pruning_variable(
     ratios = modality_ratios or dict.fromkeys(scoreable_modalities, 1.0)
 
     candidate_smiles_embs_dict_gpu = gpu_encode_smiles_variable(
-        smiles_to_score, {mod: models_for_scoring[mod] for mod in scoreable_modalities}, chunk_size
+        smiles_to_score,
+        {mod: models_for_scoring[mod] for mod in scoreable_modalities},
+        chunk_size,
     )
 
     cos_sim = torch.nn.CosineSimilarity(dim=1)
@@ -173,14 +216,20 @@ def embedding_pruning_variable(
     for mod in scoreable_modalities:
         cand_embs_gpu = candidate_smiles_embs_dict_gpu.get(mod)
         # Ensure target_1D_emb_gpu is on the same device as cand_embs_gpu for cosine_similarity
-        target_emb_device = cand_embs_gpu.device if cand_embs_gpu is not None and cand_embs_gpu.nelement() > 0 else "cpu"
+        target_emb_device = (
+            cand_embs_gpu.device
+            if cand_embs_gpu is not None and cand_embs_gpu.nelement() > 0
+            else "cpu"
+        )
         target_1D_emb_gpu = target_1D_spectral_embeddings[mod].to(target_emb_device)
 
         if (
-            cand_embs_gpu is None  # Candidate embeddings for this modality might be missing
+            cand_embs_gpu
+            is None  # Candidate embeddings for this modality might be missing
             or cand_embs_gpu.nelement() == 0  # Or empty
             or cand_embs_gpu.shape[0] != num_smiles  # Mismatch in number of SMILES
-            or cand_embs_gpu.shape[1] != target_1D_emb_gpu.shape[0]  # Mismatch in embedding dimension
+            or cand_embs_gpu.shape[1]
+            != target_1D_emb_gpu.shape[0]  # Mismatch in embedding dimension
         ):
             logger.warning(
                 f"Pruning: Skipping {mod} due to missing/mismatched candidate embeddings or target dim. Cand shape: {cand_embs_gpu.shape if cand_embs_gpu is not None else 'None'}, Target shape: {target_1D_emb_gpu.shape}"
@@ -198,13 +247,18 @@ def embedding_pruning_variable(
             # Check if this modality's individual scores were successfully computed and should be included.
             # This re-checks the conditions under which scores would have been validly computed.
             cand_embs_gpu = candidate_smiles_embs_dict_gpu.get(mod)  # From GPU encoding
-            target_emb_for_mod = target_1D_spectral_embeddings[mod]  # Original target embedding
+            target_emb_for_mod = target_1D_spectral_embeddings[
+                mod
+            ]  # Original target embedding
 
             if (
                 cand_embs_gpu is not None
                 and cand_embs_gpu.nelement() > 0
                 and cand_embs_gpu.shape[0] == num_smiles
-                and cand_embs_gpu.shape[1] == target_emb_for_mod.shape[0]  # Check dimension against original target
+                and cand_embs_gpu.shape[1]
+                == target_emb_for_mod.shape[
+                    0
+                ]  # Check dimension against original target
             ):
                 # This modality's scores in all_individual_scores_cpu[mod] are valid (not just initial zeros from skip)
                 # Add its weighted contribution to the combined_scores_cpu.
