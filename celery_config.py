@@ -118,7 +118,6 @@ def process_spectrum(self, job_id: str, request_data: dict):
         )
 
 
-# --- Periodic Cleanup Task (Unchanged) ---
 @celery_app.task(name="spectrum_processor.cleanup_old_results")
 def cleanup_old_results():
     """Periodic task to clean up old result files"""
@@ -129,7 +128,7 @@ def cleanup_old_results():
         for result_file in CACHE_DIR.glob("*.json"):
             try:
                 # Check file age (older than 24 hours)
-                if current_time - result_file.stat().st_mtime > 86400:
+                if current_time - result_file.stat().st_mtime > 86400 * 180:
                     result_file.unlink()
                     cleaned_count += 1
                     logger.info(f"Cleaned up old result file: {result_file}")
