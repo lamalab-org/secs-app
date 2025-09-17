@@ -3,8 +3,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis_broker
-    networks:
-      - my-app-network
 
   # Service #2: Your FastAPI Application
   api:
@@ -13,22 +11,21 @@ services:
     #   dockerfile: api.Dockerfile
     image: adrianmirza/elucidation:latest
     container_name: spec2struct_api_service
-    command: uvicorn app:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300
+    # command: uvicorn app:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300
     ports:
       - "8000:8000"
     depends_on:
       - vectordb
       - forward_synthesis
       - redis
-    networks:
-      - my-app-network
+    # networks:
+    #   - my-app-network
     environment:
       # Tell the app where to find the Celery broker
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     volumes:
       # Mount the shared volume to the cache directory inside the container
-      - .:/app
       - ./cache:/app/cache
 
   # Service #3: The Celery Worker
@@ -36,50 +33,39 @@ services:
     # build:
     #   context: .
     #   dockerfile: api.Dockerfile
-    image: adrianmirza/elucidation:latest
+    image: adrianmirza/celery
     container_name: celery_worker
     command: celery -A celery_config.celery_app worker -l info -Q spectrum_queue --concurrency=5
     depends_on:
       - redis
       - api
-    networks:
-      - my-app-network
+    # networks:
+    #   - my-app-network
     environment:
       # The worker also needs to know where the broker is
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
     volumes:
       # The path here MUST match the path in the 'api' service exactly.
-      - .:/app
+      # - .:/app
       - ./cache:/app/cache
 
   # Service #4: Your vector database
   vectordb:
     image: adrianmirza/retrieval
     container_name: vectordb_service
-    ports:
-      - "7999:7999"
+    # ports:
+    #   - "7999:7999"
     volumes:
       - /data/mirzaa/pubchem_vector_db_hnsw_pqm_16_ef_256_m_32:/pubchem_vector_db_hnsw_pq.index
     restart: unless-stopped
-    networks:
-      - my-app-network
+
 
   # Service #5: Forward synthesis service
   forward_synthesis:
     image: adrianmirza/forward_synthesis
     container_name: forward_synthesis
-    ports:
-      - "7998:7998"
+    # ports:
+    #   - "7998:7998"
     restart: unless-stopped
-    networks:
-      - my-app-network
 
-# Define the shared network
-networks:
-  my-app-network:
-    driver: bridge
-
-# Define the shared network
-volumes:
-  cache_data:
