@@ -34,6 +34,7 @@ RUN uv pip install --system --torch-backend cpu -U torch \
 # RUN uv pip install --system --torch-backend cpu -U torch
 COPY ./checkpoints/ ./checkpoints/
 COPY ./celery_config.py ./celery_config.py
+COPY ./config.py ./config.py
 COPY ./retrieval.py ./retrieval.py
 COPY ./main.py ./main.py
 COPY ./gafuncs.py ./gafuncs.py
