@@ -32,10 +32,13 @@ class GenerateRequest(BaseModel):
 
 @app.post("/submit")
 async def submit_spectrum_job(request: GenerateRequest):
-    """Submit a spectrum processing job to the Celery queue"""
     try:
         spectrum_as_array = np.array(request.spectrum["y"])
         job_id = short_vector_hash(spectrum_as_array)
+
+        result_file = CACHE_DIR / f"{job_id}.json"
+        if result_file.exists():
+            return {"job_id": job_id, "status": "cached", "message": "Result already exists"}
 
         request_data = request.model_dump()
         request_data["spectra_hash"] = job_id
