@@ -114,8 +114,10 @@ def process_spectrum(self, job_id: str, request_data: dict):
 
         logger.info(f"Job {job_id} completed in {processing_time:.2f} seconds")
 
-        # Return the final payload so it's stored in the result backend
-        return final_payload
+        # Return only a small marker. The full payload (incl. the submitted spectrum)
+        # would otherwise be stored in the Redis result backend for result_expires;
+        # it is already persisted to the cache file and served by /jobs/{id}/result.
+        return {"job_id": job_id, "processing_time": processing_time}
 
     except Exception as exc:
         logger.error(f"Job {job_id} failed: {exc}")

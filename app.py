@@ -93,7 +93,9 @@ def get_job_status(job_id: str):
             if isinstance(task_result.info, dict):
                 response.update(task_result.info)
         elif task_result.state == "SUCCESS":
-            response.update({"completed": True, "result": task_result.result})
+            # The full payload (incl. the submitted spectrum) lives in the cache file;
+            # fetch it via /jobs/{job_id}/result instead of bloating the status response.
+            response.update({"completed": True})
         elif task_result.state == "FAILURE":
             try:
                 error_info = {
