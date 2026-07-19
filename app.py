@@ -119,25 +119,30 @@ def get_job_status(job_id: str):
 @app.get("/jobs/{job_id}/result")
 def get_job_result(job_id: str):
     """Get the result of a completed job"""
-    # --- MODIFIED: Get task_id from Redis ---
-    task_id = get_task_id_from_job_id(job_id)
-    task_result = AsyncResult(task_id, app=celery_app)
-
-    if task_result.state != "SUCCESS":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job not completed. Current status: {task_result.state}",
-        )
-
+    # The stored file is the source of truth. Celery drops the result after
+    # result_expires (1 h) and the job_id -> task_id mapping expires after 24 h, so
+    # gating on task state made a result that is still on disk unreachable.
     result_file = CACHE_DIR / f"{job_id}.json"
-    try:
-        with result_file.open("r") as f:
-            data = json.load(f)
-        return data
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Result file not found")  # noqa: B904
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error loading results: {e!s}")  # noqa: B904
+    if result_file.exists():
+        try:
+            with result_file.open("r") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            raise HTTPException(  # noqa: B904
+                status_code=500, detail=f"Result file is not valid JSON: {e!s}"
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error loading results: {e!s}")  # noqa: B904
+
+    # No stored result: use the task, when we still know it, to explain why.
+    task_id = redis_client.get(job_id)
+    if not task_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    state = AsyncResult(task_id, app=celery_app).state
+    raise HTTPException(
+        status_code=400, detail=f"Job not completed. Current status: {state}"
+    )
 
 
 @app.delete("/jobs/{job_id}")

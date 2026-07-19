@@ -89,6 +89,7 @@ def process_spectrum(self, job_id: str, request_data: dict):
         processing_time = end_time - start_time
 
         final_payload = {
+            "query": request_data,
             "results": results,
             "metadata": {
                 "job_id": job_id,
@@ -98,10 +99,18 @@ def process_spectrum(self, job_id: str, request_data: dict):
             },
         }
 
-        # Save the result to a file for persistence/backup
+        # Save the result to a file for persistence/backup. Written to a temporary
+        # file and renamed, because /jobs/{id}/result may read it concurrently and an
+        # in-place write can be observed half-finished.
         result_file = CACHE_DIR / f"{job_id}.json"
-        with result_file.open("w") as f:
+        temp_file = CACHE_DIR / f"{job_id}.json.tmp"
+        with temp_file.open("w") as f:
             json.dump(final_payload, f)
+        temp_file.replace(result_file)
+
+        # The in-progress snapshot is superseded by the final payload.
+        partial_file = CACHE_DIR / f"{job_id}.partial.json"
+        partial_file.unlink(missing_ok=True)
 
         logger.info(f"Job {job_id} completed in {processing_time:.2f} seconds")
 
