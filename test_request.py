@@ -84,11 +84,11 @@ def process_spectrum_for_payload(spectrum_df):
     return interpolated
 
 
-spectrum = pd.read_csv("test.tsv", sep="\t")
+spectrum = pd.read_csv("test1.tsv", sep="\t")
 
 
 payload = {
-    "mf": "C4H8O",
+    "mf": "C4H8O",  # CC1=C(C1c1cc2CCc3ccc(CCc1cc2)cc3)C
     "spectrum": process_spectrum_for_payload(spectrum),
     "pop_ga": 50,
     "offspring_ga": 256,
@@ -115,28 +115,31 @@ try:
     print(f"Job submitted successfully. Job ID: {job_id}")
     print("-" * 40)
 
-    # 2. Poll for job status
-    while True:
-        print(f"Checking status for job {job_id}...")
-        status_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/status")
-        status_response.raise_for_status()
-        status_data = status_response.json()
+    # 2. Poll for job status, unless the result is already cached
+    if response_json.get("status") == "cached":
+        print("Result already cached, fetching directly...")
+    else:
+        while True:
+            print(f"Checking status for job {job_id}...")
+            status_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/status")
+            status_response.raise_for_status()
+            status_data = status_response.json()
 
-        status = status_data.get("status", "unknown").lower()
-        print(f"Current job status: {status}")
+            status = status_data.get("status", "unknown").lower()
+            print(f"Current job status: {status}")
 
-        if status == "success":
-            print("Job finished successfully. Fetching results...")
-            break
-        elif status in ["failure", "failed"]:
-            print("Job failed.")
-            print("Error details:", json.dumps(status_data, indent=2))
-            exit()
+            if status == "success":
+                print("Job finished successfully. Fetching results...")
+                break
+            elif status in ["failure", "failed"]:
+                print("Job failed.")
+                print("Error details:", json.dumps(status_data, indent=2))
+                exit()
 
-        # Wait before polling again
-        time.sleep(5)
+            # Wait before polling again
+            time.sleep(5)
 
-    print("-" * 40)
+        print("-" * 40)
 
     # 3. Fetch the final result
     print("Fetching final result...")
