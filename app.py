@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import redis
@@ -10,6 +11,9 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Spectrum Processing API with Celery", version="2.0.0")
 redis_client = redis.Redis(host="redis", port=6379, db=0, decode_responses=True)
+
+# States in which an existing task is still "alive" and must not be re-enqueued.
+ACTIVE_STATES = {"PENDING", "RECEIVED", "STARTED", "RETRY", "PROGRESS"}
 
 
 class GenerateRequest(BaseModel):
@@ -30,15 +34,63 @@ class GenerateRequest(BaseModel):
     initial_environment: dict[str, str] | None = None
 
 
+def load_json(path: Path) -> dict | None:
+    """Read a JSON file, tolerating a snapshot mid-write.
+
+    Returns the parsed dict, or None if the file is absent, momentarily
+    unreadable (writers use temp file + replace, so this is transient), or
+    not a dict.
+    """
+    if not path.exists():
+        return None
+    try:
+        with path.open("r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def load_result_file(job_id: str) -> dict | None:
+    """Final result file for a job (only complete when stamped by the worker)."""
+    return load_json(CACHE_DIR / f"{job_id}.json")
+
+
+def load_partial_file(job_id: str) -> dict | None:
+    """In-progress snapshot written by the GA during the run."""
+    return load_json(CACHE_DIR / f"{job_id}.partial.json")
+
+
+def is_completed(file_data: dict | None) -> bool:
+    """A result is final only if the worker stamped it as completed."""
+    return bool(file_data) and file_data.get("completed") is True
+
+
 @app.post("/submit")
 async def submit_spectrum_job(request: GenerateRequest):
     try:
         spectrum_as_array = np.array(request.spectrum["y"])
         job_id = short_vector_hash(spectrum_as_array)
 
-        result_file = CACHE_DIR / f"{job_id}.json"
-        if result_file.exists():
+        # 1) Finished result on disk -> serve from cache. Only a file the
+        #    worker stamped `completed: true` counts.
+        if is_completed(load_result_file(job_id)):
             return {"job_id": job_id, "status": "cached", "message": "Result already exists"}
+
+        # 2) A task for this job may still be running -> don't enqueue a
+        #    duplicate or overwrite the job_id -> task_id mapping.
+        existing_task_id = redis_client.get(job_id)
+        if existing_task_id:
+            state = AsyncResult(existing_task_id, app=celery_app).state
+            if state in ACTIVE_STATES:
+                return {
+                    "job_id": job_id,
+                    "task_id": existing_task_id,
+                    "status": "already_submitted",
+                    "message": f"Job already in progress (state: {state})",
+                }
+            # Terminal state (FAILURE/REVOKED, or SUCCESS with a missing final
+            # file): fall through and resubmit.
 
         request_data = request.model_dump()
         request_data["spectra_hash"] = job_id
@@ -49,7 +101,6 @@ async def submit_spectrum_job(request: GenerateRequest):
             queue="spectrum_queue",
         )
 
-        # Store mapping in Redis
         redis_client.set(job_id, task.id, ex=86400)
 
         return {
@@ -59,6 +110,8 @@ async def submit_spectrum_job(request: GenerateRequest):
             "message": "Job submitted to queue",
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to submit job: {e!s}")
 
@@ -78,24 +131,17 @@ def get_job_status(job_id: str):
         task_id = get_task_id_from_job_id(job_id)
         task_result = AsyncResult(task_id, app=celery_app)
 
-        if not task_result:
-            raise HTTPException(
-                status_code=500, detail="Could not retrieve task result."
-            )
-
         response = {
-            "job_id": job_id,
-            "task_id": task_id,
             "status": task_result.state.lower(),
         }
 
         if task_result.state == "PROGRESS":
             if isinstance(task_result.info, dict):
                 response.update(task_result.info)
+
         elif task_result.state == "SUCCESS":
-            # The full payload (incl. the submitted spectrum) lives in the cache file;
-            # fetch it via /jobs/{job_id}/result instead of bloating the status response.
             response.update({"completed": True})
+
         elif task_result.state == "FAILURE":
             try:
                 error_info = {
@@ -109,36 +155,50 @@ def get_job_status(job_id: str):
                 }
             response.update(error_info)
 
+        # Surface intermediate results / stage / progress from the GA's
+        # partial snapshot ({job_id}.partial.json), which the worker updates
+        # each generation.
+        if task_result.state not in ("SUCCESS", "FAILURE"):
+            partial = load_partial_file(job_id)
+            if partial:
+                if "results" in partial:
+                    response["results"] = partial["results"]
+                metadata = partial.get("metadata")
+                if isinstance(metadata, dict):
+                    for key in ("stage", "generation", "n_evaluated", "logs"):
+                        if key in metadata:
+                            response[key] = metadata[key]
+
         return response
-    except HTTPException as http_exc:
-        raise http_exc
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"An unexpected error occurred: {e!s}"
-        )  # noqa: B904
+        )
 
 
 @app.get("/jobs/{job_id}/result")
 def get_job_result(job_id: str):
-    """Get the result of a completed job"""
-    # The stored file is the source of truth. Celery drops the result after
-    # result_expires (1 h) and the job_id -> task_id mapping expires after 24 h, so
-    # gating on task state made a result that is still on disk unreachable.
-    result_file = CACHE_DIR / f"{job_id}.json"
-    if result_file.exists():
-        try:
-            with result_file.open("r") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise HTTPException(  # noqa: B904
-                status_code=500, detail=f"Result file is not valid JSON: {e!s}"
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error loading results: {e!s}")  # noqa: B904
+    """Get the result of a completed job.
 
-    # No stored result: use the task, when we still know it, to explain why.
+    The stored file is the source of truth, but only when the worker has
+    stamped it `completed: true`.
+    """
+    file_data = load_result_file(job_id)
+    if is_completed(file_data):
+        return file_data
+
+    # Not done: use the task, when we still know it, to explain why.
     task_id = redis_client.get(job_id)
     if not task_id:
+        if file_data is not None or load_partial_file(job_id) is not None:
+            # Files exist but the task mapping expired: the job died mid-run
+            # or the mapping outlived it. Don't serve incomplete data.
+            raise HTTPException(
+                status_code=410,
+                detail="Job did not complete and its task is no longer tracked.",
+            )
         raise HTTPException(status_code=404, detail="Job not found")
 
     state = AsyncResult(task_id, app=celery_app).state
@@ -153,8 +213,10 @@ def cancel_job(job_id: str):
     task_id = get_task_id_from_job_id(job_id)
     celery_app.control.revoke(task_id, terminate=True)
 
-    # Clean up the mapping from Redis
+    # Clean up the mapping and any in-progress snapshot so a later /submit of
+    # the same spectrum starts clean instead of seeing stale partial data.
     redis_client.delete(job_id)
+    (CACHE_DIR / f"{job_id}.partial.json").unlink(missing_ok=True)
 
     return {"job_id": job_id, "task_id": task_id, "status": "cancelled"}
 

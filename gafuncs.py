@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import TypeVar
 
 import numpy as np
@@ -36,6 +37,17 @@ class CachedFunction:
         self.spectra_hash = spectra_hash
         self.cache = {}
         self.initial_population = initial_population
+        # Counts eval_batch calls. The first call scores the initial
+        # population; each subsequent call corresponds to one GA generation
+        # (offspring evaluation). So generation = n_eval_batches - 1, clamped
+        # at 0. CAVEAT: if the GA ever calls eval_batch more than once per
+        # generation (e.g. re-scoring elites), this proxy drifts; the clean
+        # fix is a progress callback threaded through spec2struct.
+        self.n_eval_batches = 0
+
+    @property
+    def generation(self) -> int:
+        return max(self.n_eval_batches - 1, 0)
 
     def eval_batch(self, inputs: list[str]) -> list[float]:
         """Evaluates the function on a batch of inputs, using the cache."""
@@ -47,9 +59,9 @@ class CachedFunction:
             for x, y in zip(inputs_not_cached, outputs_not_cached, strict=False):
                 self.cache[x] = y
 
-        # --- Start of modification ---
+        self.n_eval_batches += 1
 
-        # Create a list of all items in the cache
+        # Snapshot the current best candidates for the /status endpoint.
         all_items = [
             {
                 "smiles": k,
@@ -59,14 +71,33 @@ class CachedFunction:
             }
             for k, v in self.cache.items()
         ]
-        # Sort the list of items by score in descending order (higher score is better)
+        # Higher score is better
         sorted_items = sorted(all_items, key=lambda item: item["score"], reverse=True)
 
-        # Take the top 512 items from the sorted list
-        top_128_items = sorted_items[:128]
+        stage = (
+            "initial population"
+            if self.n_eval_batches == 1
+            else f"generation {self.generation}"
+        )
+        snapshot = {
+            "results": sorted_items,
+            "metadata": {
+                "stage": stage,
+                "generation": self.generation,
+                "n_evaluated": len(self.cache),
+            },
+        }
 
-        with open(f"{CACHE_DIR!s}/{self.spectra_hash}.json", "w") as f:
-            json.dump(top_128_items, f)
+        # Written to a separate path: the presence of "<hash>.json" (with
+        # completed=true) is what /submit uses to decide a run is finished, so
+        # in-progress snapshots must not create it. Written via temp file +
+        # replace because /jobs/{id}/status may read it concurrently and an
+        # in-place write can be observed half-finished.
+        partial_file = CACHE_DIR / f"{self.spectra_hash}.partial.json"
+        temp_file = CACHE_DIR / f"{self.spectra_hash}.partial.json.tmp"
+        with temp_file.open("w") as f:
+            json.dump(snapshot, f)
+        temp_file.replace(partial_file)
 
         return [self.cache[x] for x in inputs]
 

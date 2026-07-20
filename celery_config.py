@@ -1,20 +1,20 @@
 import hashlib
 import json
-import threading
 import time
-from pathlib import Path
 
 import numpy as np  # noqa: F401
 from celery import Celery
-from loguru import logger
-from main import spec2struct
 from config import CACHE_DIR
+from loguru import logger
+
+# NOTE: renamed import — the compute entrypoint must NOT live in the same
+# module as the FastAPI app (circular import: api imports celery_config,
+# celery_config imported main). Move spec2struct into its own module.
+from spec2struct_runner import spec2struct
 
 # --- Celery App Configuration ---
-# Create Celery instance
 celery_app = Celery("spectrum_processor")
 
-# Configuration
 celery_app.conf.update(
     # Broker settings (Redis)
     broker_url="redis://redis:6379/0",
@@ -52,14 +52,13 @@ celery_app.conf.update(
 CACHE_DIR.mkdir(exist_ok=True)
 
 
-# --- Helper Function (Unchanged) ---
+# --- Helper Function ---
 def short_vector_hash(vector, length=32):
     """Generate a short hash for better readability"""
     full_hash = hashlib.sha256(vector.tobytes()).hexdigest()
     return full_hash[:length]
 
 
-# --- CORRECTED Celery Task ---
 @celery_app.task(bind=True, name="spectrum_processor.process_spectrum")
 def process_spectrum(self, job_id: str, request_data: dict):
     """
@@ -82,13 +81,18 @@ def process_spectrum(self, job_id: str, request_data: dict):
             },
         )
 
-        # Directly call the function
+        # Directly call the function. Per-generation progress is written by the
+        # GA itself to {job_id}.partial.json (see CachedFunction.eval_batch),
+        # which the API's /status endpoint reads.
         results = spec2struct(**request_data) or []
 
         end_time = time.time()
         processing_time = end_time - start_time
 
         final_payload = {
+            # Contract with the API: only a file carrying this flag is treated
+            # as a finished result by /submit (cache hit) and /jobs/{id}/result.
+            "completed": True,
             "query": request_data,
             "results": results,
             "metadata": {
@@ -96,12 +100,12 @@ def process_spectrum(self, job_id: str, request_data: dict):
                 "processing_time": processing_time,
                 "timestamp": time.time(),
                 "task_id": self.request.id,
+                "total_generations": total_gens,
             },
         }
 
-        # Save the result to a file for persistence/backup. Written to a temporary
-        # file and renamed, because /jobs/{id}/result may read it concurrently and an
-        # in-place write can be observed half-finished.
+        # Written to a temporary file and renamed, because the API may read it
+        # concurrently and an in-place write can be observed half-finished.
         result_file = CACHE_DIR / f"{job_id}.json"
         temp_file = CACHE_DIR / f"{job_id}.json.tmp"
         with temp_file.open("w") as f:
@@ -114,14 +118,13 @@ def process_spectrum(self, job_id: str, request_data: dict):
 
         logger.info(f"Job {job_id} completed in {processing_time:.2f} seconds")
 
-        # Return only a small marker. The full payload (incl. the submitted spectrum)
-        # would otherwise be stored in the Redis result backend for result_expires;
-        # it is already persisted to the cache file and served by /jobs/{id}/result.
+        # Return only a small marker. The full payload (incl. the submitted
+        # spectrum) would otherwise sit in the Redis result backend for
+        # result_expires; it is already persisted to the cache file.
         return {"job_id": job_id, "processing_time": processing_time}
 
     except Exception as exc:
         logger.error(f"Job {job_id} failed: {exc}")
-        # Let Celery handle the failure state update. The retry mechanism will do this automatically.
         raise self.retry(
             exc=exc,
             countdown=min(60 * (2**self.request.retries), 300),
@@ -131,20 +134,31 @@ def process_spectrum(self, job_id: str, request_data: dict):
 
 @celery_app.task(name="spectrum_processor.cleanup_old_results")
 def cleanup_old_results():
-    """Periodic task to clean up old result files"""
+    """Periodic task to clean up old result files (older than 180 days) and
+    orphaned temp files (older than 1 hour)."""
     try:
         current_time = time.time()
         cleaned_count = 0
 
+        # Old results and stale partials (180 days)
         for result_file in CACHE_DIR.glob("*.json"):
             try:
-                # Check file age (older than 24 hours)
                 if current_time - result_file.stat().st_mtime > 86400 * 180:
                     result_file.unlink()
                     cleaned_count += 1
                     logger.info(f"Cleaned up old result file: {result_file}")
             except Exception as e:
                 logger.error(f"Error cleaning file {result_file}: {e}")
+
+        # Orphaned temp files from crashed writes (anything > 1 h old)
+        for tmp_file in CACHE_DIR.glob("*.tmp"):
+            try:
+                if current_time - tmp_file.stat().st_mtime > 3600:
+                    tmp_file.unlink()
+                    cleaned_count += 1
+                    logger.info(f"Cleaned up orphaned temp file: {tmp_file}")
+            except Exception as e:
+                logger.error(f"Error cleaning file {tmp_file}: {e}")
 
         logger.info(f"Cleanup task completed. Removed {cleaned_count} old files.")
         return {"cleaned_files": cleaned_count}
