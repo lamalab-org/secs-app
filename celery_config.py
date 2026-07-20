@@ -7,10 +7,7 @@ from celery import Celery
 from config import CACHE_DIR
 from loguru import logger
 
-# NOTE: renamed import — the compute entrypoint must NOT live in the same
-# module as the FastAPI app (circular import: api imports celery_config,
-# celery_config imported main). Move spec2struct into its own module.
-from spec2struct_runner import spec2struct
+from main import spec2struct
 
 # --- Celery App Configuration ---
 celery_app = Celery("spectrum_processor")
